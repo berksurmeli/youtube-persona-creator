@@ -1,10 +1,18 @@
 # YouTube Persona Creator – RLHF Training Stack
 
-This repository contains a complete local workflow for **collecting RLHF-style feedback** and **fine‑tuning a local LLM (Llama 3.1 13B Instruct)** to generate content in different *personas*.
+This repository contains a complete local workflow for **collecting RLHF-style feedback** and **fine‑tuning a local LLM** to generate content in different _personas_.
+
+There are two key models involved:
+
+- **Generation model (for data collection):**  
+  A local `llama-3.1-13b-instruct` model running in **LM Studio** as a server. This is what Rails calls to generate candidate outputs for ranking.
+- **Training base model (for fine-tuning):**  
+  A Hugging Face model such as **`meta-llama/Meta-Llama-3-8B-Instruct`**, which you fine‑tune using the collected feedback (SFT, DPO, Reward Model). This model is _separate_ from the LM Studio GGUF model.
 
 The project is split into two parts:
 
 - `rails-app/` – A Rails web app for:
+
   - Defining **Personas**
   - Creating **Topics** under Personas
   - Generating **multiple model outputs** per Topic using LM Studio
@@ -93,6 +101,32 @@ Typical fields:
 - `persona_id` – FK to Persona
 - `title` – short human-friendly name
 - `description` – the actual prompt sent to the LLM
+
+`Topic` also provides a helper to embed persona context into training data:
+
+```ruby
+class Topic < ApplicationRecord
+  belongs_to :persona
+  has_many :generated_contents, dependent: :destroy
+  has_one :ranking, dependent: :destroy
+
+  validates :title, :description, presence: true
+
+  def full_prompt_for_persona
+    <<~PROMPT
+    You are the following persona:
+
+    #{persona.name}
+    #{persona.description}
+
+    Generate content for this request:
+    #{description}
+    PROMPT
+  end
+end
+```
+
+This method is used when **exporting datasets** so the training data always includes persona context.
 
 #### GeneratedContent
 
@@ -202,7 +236,7 @@ class GeneratedContentsController < ApplicationController
     topic = Topic.find(params[:topic_id])
 
     VARIANTS.times do |i|
-      result = LlmClient.generate(topic.full_prompt_for_persona)
+      result = LlmClient.generate(topic.description, persona: topic.persona)
       topic.generated_contents.create!(
         content: result,
         variant_index: i
@@ -214,21 +248,10 @@ class GeneratedContentsController < ApplicationController
 end
 ```
 
-> `full_prompt_for_persona` is typically a helper on `Topic` that combines Persona + Topic, e.g.:
->
-> ```ruby
-> def full_prompt_for_persona
->   <<~PROMPT
->   You are the following persona:
->   #{persona.name} - #{persona.description}
->
->   Generate content for this request:
->   #{description}
->   PROMPT
-> end
-> ```
+Here:
 
-This ensures **Persona context is embedded into every instruction** and will therefore influence training.
+- The **generation prompt** sent to LM Studio is the _topic description_ plus a system persona message.
+- The **training instruction** (in exporters) uses `full_prompt_for_persona`, which inlines persona + topic into a single string. So persona influences both generation and training.
 
 ---
 
@@ -236,8 +259,8 @@ This ensures **Persona context is embedded into every instruction** and will the
 
 LM Studio runs a local server (OpenAI-compatible) e.g. at:
 
-- `http://localhost:1234/v1/chat/completions`  
-- Model: `llama-3.1-13b-instruct`
+- `http://localhost:1234/v1/chat/completions`
+- Model: `llama-3.1-13b-instruct` (GGUF, local only)
 
 `app/services/llm_client.rb`:
 
@@ -248,24 +271,38 @@ require 'json'
 class LlmClient
   BASE_URL = "http://localhost:1234/v1/chat/completions"
 
-  def self.generate(prompt)
+  def self.generate(prompt, persona: nil)
     uri = URI(BASE_URL)
+
+    messages = []
+    if persona
+      messages << {
+        role: "system",
+        content: "You are the following persona:\n\n#{persona.description}"
+      }
+    end
+
+    messages << { role: "user", content: prompt }
 
     payload = {
       model: "llama-3.1-13b-instruct",
-      messages: [
-        { role: "user", content: prompt }
-      ],
+      messages: messages,
       temperature: 0.7,
       max_tokens: 500
     }
 
     resp = Net::HTTP.post(uri, payload.to_json, "Content-Type" => "application/json")
     json = JSON.parse(resp.body)
-    json["choices"][0]["message"]["content"]
+    json.dig("choices", 0, "message", "content")
   end
 end
 ```
+
+This way:
+
+- Persona is injected via the **system message** at inference time.
+- Topic description is provided as the **user message**.
+- The training datasets still use a text-only instruction built from `full_prompt_for_persona`.
 
 ---
 
@@ -313,10 +350,10 @@ The app uses **simple inline CSS** (no Tailwind/Bootstrap) but provides a clean 
   - Button: **Rank Outputs**
   - List of existing GeneratedContent cards
 - Rank page:
-  - Displays 3 variants in cards
+  - Displays 3 variants in cards (side-by-side layout)
   - Each card has a dropdown to pick rank **1 (Best), 2 (Middle), 3 (Worst)**
 
-The styling is minimal, intentionally framework-free, and lives in `application.html.erb` using a `.container`, `.card`, `.btn`, etc.
+The styling is minimal, intentionally framework-free, and lives in `application.html.erb` using classes like `.container`, `.card`, `.btn`, plus a simple top navbar.
 
 ---
 
@@ -331,11 +368,11 @@ class SftDatasetExporter
   def self.export(path = "export_sft.jsonl")
     File.open(path, "w") do |file|
       Ranking.find_each do |r|
-        winner = GeneratedContent.find(r.best_id)
+        best = GeneratedContent.find(r.best_id)
 
         record = {
           instruction: r.topic.full_prompt_for_persona,
-          output: winner.content
+          output: best.content
         }
 
         file.puts(record.to_json)
@@ -348,7 +385,7 @@ end
 ```
 
 - Uses **persona-aware instruction** from `Topic#full_prompt_for_persona`
-- Uses only the **best** output
+- Uses only the **best** output per ranking
 
 Run from Rails root:
 
@@ -468,6 +505,18 @@ Output: `export_rm.jsonl`
 
 All training code lives in `model-training/`. Training **does not run from Rails**.
 
+Training is done on a **Hugging Face base model**, e.g.:
+
+```python
+BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+```
+
+You must have:
+
+- A Hugging Face account
+- Accepted the Meta Llama 3 license
+- Logged in via CLI: `hf auth login`
+
 ### 3.1. Environment Setup
 
 From `model-training/`:
@@ -508,19 +557,26 @@ print("MPS built:", torch.backends.mps.is_built())
 EOF
 ```
 
+You should see `MPS available: True` on Apple Silicon.
+
 ---
 
 ### 3.2. SFT Training – `train_sft.py`
 
 Key ideas:
 
-- Loads `../rails-app/export_sft.jsonl`
-- Formats data as `<s>[INST] ... [/INST]\n output </s>`
-- Loads base model: `meta-llama/Meta-Llama-3.1-13B-Instruct`
+- Loads dataset from a JSONL path (CLI option `--dataset`).
+- Defaults to `../rails-app/export_sft.jsonl` if not overridden.
+- Formats each example as:
+  ```
+  <s>[INST] {instruction} [/INST]
+  {output}</s>
+  ```
+- Loads base model: `meta-llama/Meta-Llama-3-8B-Instruct`
 - Applies LoRA
-- Saves `./sft-llama-3.1-13b`
+- Saves to `./sft-llama-3-8b` (or similar folder)
 
-Run:
+Example command (default path):
 
 ```bash
 cd model-training
@@ -528,143 +584,132 @@ source .venv/bin/activate
 python train_sft.py
 ```
 
+Or with an explicit dataset argument (e.g. a test fixture):
+
+```bash
+python train_sft.py --dataset ../rails-app/export_sft_test.jsonl
+```
+
 ---
 
 ### 3.3. DPO Training – `train_dpo.py`
 
+DPO consumes `export_dpo.jsonl` (or another file specified via `--dataset`).
+
 Key ideas:
 
-- Loads `../rails-app/export_dpo.jsonl`
 - Uses columns: `instruction`, `chosen`, `rejected`
-- Optionally starts from SFT checkpoint (`./sft-llama-3.1-13b`)
+- Optionally starts from the SFT checkpoint (`./sft-llama-3-8b`) if it exists; otherwise, starts from `BASE_MODEL`
 - Applies LoRA again
 - Uses TRL `DPOTrainer`
-- Saves `./dpo-llama-3.1-13b`
+- Saves to `./dpo-llama-3-8b`
 
-Run:
+Example commands:
 
 ```bash
-python train_dpo.py
+python train_dpo.py               # uses ../rails-app/export_dpo.jsonl
+python train_dpo.py --dataset ../rails-app/export_dpo_test.jsonl
 ```
 
 ---
 
 ### 3.4. Reward Model Training – `train_rm.py`
 
+The reward model consumes `export_rm.jsonl` (or a custom path via `--dataset`).
+
 Key ideas:
 
-- Loads `../rails-app/export_rm.jsonl`
-- Uses `instruction + response` → text
-- Trains a **regression head** on top of LLaMA (`num_labels = 1`, `problem_type="regression"`)
-- Reward values: `+1`, `0`, `-1`
-- Saves `./reward-model-llama-3.1-13b`
+- Concatenates `instruction + response` → a single `text` field:
+  ```
+  <s>[INST] {instruction} [/INST]
+  {response}</s>
+  ```
+- Trains a **regression head** (`num_labels = 1`, `problem_type="regression"`) on top of the base model
+- Reward values are `+1`, `0`, `-1`
+- Saves to `./reward-model-llama-3-8b`
 
-Run:
+Example:
 
 ```bash
-python train_rm.py
+python train_rm.py               # uses ../rails-app/export_rm.jsonl
+python train_rm.py --dataset ../rails-app/export_rm_test.jsonl
 ```
 
-This can later be used to score new model outputs or drive PPO-style RLHF.
+This reward model can be used later to score new outputs or as a component in PPO-style RLHF.
 
 ---
 
 ### 3.5. Merging LoRA to Full HF Model – `merge_lora.py`
 
-Once SFT/DPO are trained, you can merge adapters into a standalone HF model.
-
-Example usage:
+Once SFT or DPO is trained, you can merge the LoRA adapters into a standalone Hugging Face model:
 
 ```bash
 python merge_lora.py \
-  --base-model meta-llama/Meta-Llama-3.1-13B-Instruct \
-  --adapter-path ./dpo-llama-3.1-13b \
-  --output-path ./merged-dpo-llama-3.1-13b
+  --base-model meta-llama/Meta-Llama-3-8B-Instruct \
+  --adapter-path ./dpo-llama-3-8b \
+  --output-path ./merged-dpo-llama-3-8b
 ```
 
-Result: a standard HuggingFace model folder at `merged-dpo-llama-3.1-13b/`.
+Result: a standard HuggingFace model folder at `merged-dpo-llama-3-8b/` containing:
+
+- `config.json`
+- `model.safetensors` shards
+- `tokenizer.json` etc.
+
+You can do the same for SFT:
+
+```bash
+python merge_lora.py \
+  --base-model meta-llama/Meta-Llama-3-8B-Instruct \
+  --adapter-path ./sft-llama-3-8b \
+  --output-path ./merged-sft-llama-3-8b
+```
 
 ---
 
 ### 3.6. Converting Merged Model to GGUF (LM Studio)
 
-Using `llama.cpp`:
+To use your fine‑tuned model in **LM Studio**, you convert the merged HF model to GGUF using **llama.cpp**.
+
+Clone llama.cpp once:
 
 ```bash
 cd ~/dev
 git clone https://github.com/ggerganov/llama.cpp.git
+```
 
-cd llama.cpp
+Convert merged DPO model:
+
+```bash
+cd ~/dev/llama.cpp
 
 python convert_hf_to_gguf.py \
-  --model ~/dev/youtube-persona-creator/model-training/merged-dpo-llama-3.1-13b \
-  --outfile ~/dev/youtube-persona-creator/gguf-models/llama-3.1-13b-dpo.q4_k_m.gguf \
+  --model ~/dev/youtube-persona-creator/model-training/merged-dpo-llama-3-8b \
+  --outfile ~/dev/youtube-persona-creator/gguf-models/llama-3-8b-dpo.q4_k_m.gguf \
   --outtype q4_k_m
 ```
 
-You can repeat for SFT:
+You can repeat for the SFT model:
 
 ```bash
 python convert_hf_to_gguf.py \
-  --model ~/dev/youtube-persona-creator/model-training/merged-sft-llama-3.1-13b \
-  --outfile ~/dev/youtube-persona-creator/gguf-models/llama-3.1-13b-sft.q4_k_m.gguf \
+  --model ~/dev/youtube-persona-creator/model-training/merged-sft-llama-3-8b \
+  --outfile ~/dev/youtube-persona-creator/gguf-models/llama-3-8b-sft.q4_k_m.gguf \
   --outtype q4_k_m
 ```
 
-Then in **LM Studio**, add the generated GGUF file as a local model.
+Then in **LM Studio**, add the generated GGUF file as a local model and run it like any other model.
+
+> Note: The LM Studio “generation model” used during data collection does **not** have to be the same as the HF base model you train. The pipeline is:
+>
+> - LM Studio (GGUF) → generate + collect rankings
+> - HF (Transformers) → train on exported data
+> - Convert trained HF model back to GGUF → load in LM Studio
 
 ---
 
-## 4. How Personas Influence Training
-
-Personas are **not just UI metadata** – they are **baked into the training data** by:
-
-1. Combining persona name + description with the topic prompt inside `Topic#full_prompt_for_persona`.
-2. Using that **combined text** as the `instruction` in all exported datasets (SFT / DPO / RM).
-
-That means:
-
-- During SFT, the model learns:  
-  “When I see *this persona context + this topic*, the best style of output is *this*.”
-- During DPO, preference learning learns which outputs better match the persona’s style.
-- During reward modeling, the reward head learns to give higher scores to outputs that match the persona’s intent.
-
-Over time, as you collect more data for each Persona, you build a **persona-conditioned LLM** that can generate content aligned with different YouTube “characters.”
-
----
-
-## 5. Typical Workflow
-
-1. **Create Persona** (e.g. “Short-form aggressive finance coach”).
-2. **Create Topic** under that Persona (video idea/prompt).
-3. Click **Generate Outputs** → Rails calls LM Studio → stores 3 variants.
-4. Click **Rank Outputs**:
-   - Assign 1 / 2 / 3 as Best / Middle / Worst.
-5. Repeat for many topics / personas.
-6. Periodically run exporters in `rails-app/`:
-   - `SftDatasetExporter.export`
-   - `RankingDatasetExporter.export`
-   - `RmDatasetExporter.export`
-7. In `model-training/`:
-   - Train SFT → `train_sft.py`
-   - Train DPO → `train_dpo.py`
-   - Optionally train RM → `train_rm.py`
-   - Merge adapters → `merge_lora.py`
-   - Convert to GGUF → `llama.cpp` script
-8. Load GGUF model into **LM Studio** and use your **persona-tuned** Llama model locally.
-
----
-
-## 6. Notes & Future Improvements
-
-- Add **dataset stats page** (count of Persons, Topics, Generations, Rankings).
-- Add **export buttons** in Rails UI to trigger exporters from the browser (calling `system` or background jobs).
-- Add **more structured feedback** (tags like “too generic”, “wrong tone”, etc.).
-- Add **automatic eval** using the reward model against new generations.
-
----
-
-## 7. License
+## 4. License
 
 MIT License – use at your own risk, no warranty.
 
+You are responsible for complying with the upstream LLaMA 3 license and any additional restrictions on usage or distribution of fine‑tuned models.
