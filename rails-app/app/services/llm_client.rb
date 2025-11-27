@@ -8,10 +8,11 @@ class LlmClient
     uri = URI(BASE_URL)
 
     messages = []
+
     if persona
       messages << {
         role: "system",
-        content: "You are the following persona:\n\n#{persona.description}"
+        content: "You are the following persona:\n\n#{persona.name}\n#{persona.description}"
       }
     end
 

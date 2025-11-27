@@ -5,7 +5,11 @@ class GeneratedContentsController < ApplicationController
     topic = Topic.find(params[:topic_id])
 
     VARIANTS.times do |i|
-      llm_output = LlmClient.generate(topic.description)
+      llm_output = LlmClient.generate(
+        topic.full_prompt_for_persona,
+        persona: topic.persona
+      )
+
 
       topic.generated_contents.create!(
         content: llm_output,
