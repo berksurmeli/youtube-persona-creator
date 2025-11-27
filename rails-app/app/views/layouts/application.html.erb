@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>RLHF Builder</title>
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        background: #f7f7f9;
+        margin: 0;
+        padding: 0;
+      }
+
+      .navbar {
+        background: #ffffff;
+        border-bottom: 1px solid #ddd;
+        padding: 10px 0;
+        position: sticky;
+        top: 0;
+        z-index: 50;
+      }
+
+      .nav-container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 0 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .nav-logo {
+        font-size: 20px;
+        font-weight: bold;
+        text-decoration: none;
+        color: #007aff;
+      }
+
+      .nav-right .nav-link {
+        margin-left: 20px;
+        text-decoration: none;
+        color: #333;
+        font-weight: 500;
+      }
+
+      .nav-right .nav-link:hover {
+        color: #007aff;
+      }
+
+      .container {
+        max-width: 960px;
+        margin: 20px auto;
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      }
+
+      h1, h2, h3 {
+        color: #333;
+      }
+
+      .btn {
+        display: inline-block;
+        padding: 8px 16px;
+        border-radius: 6px;
+        text-decoration: none;
+        font-weight: 500;
+        margin: 4px 0;
+        border: none;
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: #007aff;
+        color: white;
+      }
+
+      .btn-secondary {
+        background: #e0e0e0;
+        color: #222;
+      }
+
+      .card {
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 20px;
+      }
+
+      pre {
+        white-space: pre-wrap;
+        background: #f2f2f2;
+        padding: 10px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+        max-height: 260px;
+        overflow-y: auto;
+      }
+
+      .columns {
+        display: flex;
+        gap: 16px;
+      }
+
+      .columns > .card {
+        flex: 1;
+      }
+    </style>
+  </head>
+
+  <body>
+    <nav class="navbar">
+      <div class="nav-container">
+        <div class="nav-left">
+          <a href="<%= root_path %>" class="nav-logo">RLHFBuilder</a>
+        </div>
+        <div class="nav-right">
+          <a href="<%= personas_path %>" class="nav-link">Personas</a>
+          <a href="<%= new_persona_path %>" class="nav-link">New Persona</a>
+          <a href="<%= topics_path %>" class="nav-link">Topics</a>
+          <a href="<%= new_topic_path %>" class="nav-link">New Topic</a>
+        </div>
+      </div>
+    </nav>
+
+    <div class="container">
+      <% if notice %>
+        <p style="color: green;"><%= notice %></p>
+      <% end %>
+
+      <%= yield %>
+    </div>
+  </body>
+</html>

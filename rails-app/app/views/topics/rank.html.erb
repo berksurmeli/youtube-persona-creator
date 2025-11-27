@@ -1,0 +1,42 @@
+<h1>Rank Outputs</h1>
+
+<div class="card">
+  <h3>Persona: <%= @persona.name %></h3>
+  <p><%= truncate(@persona.description, length: 260) %></p>
+</div>
+
+<div class="card">
+  <h3>Topic Prompt</h3>
+  <p><%= simple_format(@topic.description) %></p>
+</div>
+
+<% if @contents.size < 3 %>
+  <p>You need 3 outputs to rank.</p>
+  <%= button_to "Generate Outputs", topic_generated_contents_path(@topic),
+                method: :post, class: "btn btn-primary" %>
+<% else %>
+
+  <%= form_with url: submit_rank_topic_path(@topic), method: :post do %>
+    <div class="columns">
+      <% @contents.each do |content| %>
+        <div class="card">
+          <h3>Variant <%= content.variant_index %></h3>
+          <pre><%= content.content %></pre>
+
+          <label>Rank</label><br>
+          <select name="ranking[<%= content.id %>]">
+            <option value="">Select</option>
+            <option value="1">1 - Best</option>
+            <option value="2">2 - Middle</option>
+            <option value="3">3 - Worst</option>
+          </select>
+        </div>
+      <% end %>
+    </div>
+
+    <p>
+      <%= submit_tag "Submit Ranking", class: "btn btn-primary" %>
+    </p>
+  <% end %>
+
+<% end %>

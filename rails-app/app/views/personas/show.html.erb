@@ -1,0 +1,25 @@
+<h1><%= @persona.name %></h1>
+
+<div class="card">
+  <h3>Persona Prompt</h3>
+  <p><%= simple_format(@persona.description) %></p>
+</div>
+
+<h2>Topics for this Persona</h2>
+
+<p>
+  <%= link_to "New Topic with this Persona",
+              new_topic_path(topic: { persona_id: @persona.id }),
+              class: "btn btn-primary" %>
+</p>
+
+<% @topics.each do |topic| %>
+  <div class="card">
+    <h3><%= link_to topic.title, topic_path(topic) %></h3>
+    <p><%= truncate(topic.description, length: 180) %></p>
+  </div>
+<% end %>
+
+<% if @topics.empty? %>
+  <p>No topics yet. Create one above.</p>
+<% end %>

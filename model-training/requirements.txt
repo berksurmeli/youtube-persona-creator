@@ -1,0 +1,21 @@
+# Core deep learning + model loading
+transformers>=4.40.0
+accelerate>=0.30.0
+datasets>=2.18.0
+sentencepiece>=0.1.99
+tokenizers>=0.19.0
+
+# LoRA / QLoRA (on macOS this will use Metal backend)
+peft>=0.11.1
+
+# RLHF training (DPO, PPO, Reward Models)
+trl>=0.7.11
+
+# Optional utility packages
+typing-extensions>=4.10.0
+protobuf>=4.25.3
+scipy
+numpy
+pandas
+tqdm>=4.66.0
+

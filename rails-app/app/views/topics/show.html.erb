@@ -1,0 +1,29 @@
+<h1><%= @topic.title %></h1>
+
+<p>
+  <strong>Persona:</strong>
+  <%= link_to @persona.name, persona_path(@persona) %>
+</p>
+
+<div class="card">
+  <h3>Topic Prompt</h3>
+  <p><%= simple_format(@topic.description) %></p>
+</div>
+
+<p>
+  <%= button_to "Generate Outputs", topic_generated_contents_path(@topic),
+                method: :post, class: "btn btn-primary" %>
+  <%= link_to "Rank Outputs", rank_topic_path(@topic),
+              class: "btn btn-secondary" %>
+</p>
+
+<h2>Generated Outputs</h2>
+
+<div class="columns">
+  <% @contents.each do |content| %>
+    <div class="card">
+      <h3>Variant <%= content.variant_index %></h3>
+      <pre><%= content.content %></pre>
+    </div>
+  <% end %>
+</div>

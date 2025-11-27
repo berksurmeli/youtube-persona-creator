@@ -1,0 +1,17 @@
+<h1>New Persona</h1>
+
+<%= form_with model: @persona do |f| %>
+  <div class="card">
+    <p>
+      <label>Name</label><br>
+      <%= f.text_field :name, style: "width: 100%; padding: 8px;" %>
+    </p>
+
+    <p>
+      <label>Description (persona prompt)</label><br>
+      <%= f.text_area :description, rows: 8, style: "width: 100%; padding: 8px;" %>
+    </p>
+
+    <%= f.submit "Create Persona", class: "btn btn-primary" %>
+  </div>
+<% end %>

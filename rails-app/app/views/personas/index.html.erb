@@ -1,0 +1,16 @@
+<h1>Personas</h1>
+
+<p>
+  <%= link_to "New Persona", new_persona_path, class: "btn btn-primary" %>
+</p>
+
+<% @personas.each do |persona| %>
+  <div class="card">
+    <h2><%= link_to persona.name, persona_path(persona) %></h2>
+    <p><%= truncate(persona.description, length: 200) %></p>
+  </div>
+<% end %>
+
+<% if @personas.empty? %>
+  <p>No personas yet. Create one to start.</p>
+<% end %>
