@@ -1,4 +1,6 @@
 import os
+import argparse
+
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -13,9 +15,9 @@ import torch
 # SETTINGS
 # ---------------------------------------------------------
 
-BASE_MODEL = "meta-llama/Meta-Llama-3.1-13B-Instruct"
-DATASET_PATH = "../rails-app/export_rm.jsonl"
-OUTPUT_DIR = "./reward-model-llama-3.1-13b"
+BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+DEFAULT_DATASET_PATH = "../rails-app/export_rm.jsonl"
+DEFAULT_OUTPUT_DIR = "./reward-model-llama-3-8b"
 
 NUM_LABELS = 1  # scalar reward
 BATCH_SIZE = 1
@@ -25,125 +27,137 @@ NUM_EPOCHS = 2
 MAX_LENGTH = 1024
 
 
-# ---------------------------------------------------------
-# DEVICE SETUP
-# ---------------------------------------------------------
-
-if torch.backends.mps.is_available():
-    device = "mps"
-elif torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
-
-print("Using device:", device)
+def get_device():
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda"
+    else:
+        return "cpu"
 
 
-# ---------------------------------------------------------
-# LOAD DATASET
-# ---------------------------------------------------------
-# export_rm.jsonl contains:
-# { instruction, response, reward }
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=DEFAULT_DATASET_PATH,
+        help="Path to RM JSONL dataset",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Where to save the reward model",
+    )
+    args = parser.parse_args()
 
-dataset = load_dataset("json", data_files=DATASET_PATH)
+    dataset_path = args.dataset
+    output_dir = args.output_dir
+
+    print("Using dataset:", dataset_path)
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Dataset not found at: {dataset_path}")
+
+    device = get_device()
+    print("Using device:", device)
+
+    # ---------------------------------------------------------
+    # LOAD DATASET
+    # ---------------------------------------------------------
+    # export_rm.jsonl: { instruction, response, reward }
+
+    dataset = load_dataset("json", data_files=dataset_path)
+
+    def preprocess(example):
+        text = f"<s>[INST] {example['instruction']} [/INST]\n{example['response']}</s>"
+        return {"text": text, "label": float(example["reward"])}
+
+    dataset = dataset.map(preprocess)
+
+    # ---------------------------------------------------------
+    # LOAD MODEL + TOKENIZER
+    # ---------------------------------------------------------
+
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        BASE_MODEL,
+        num_labels=NUM_LABELS,
+        problem_type="regression",
+        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+    )
+
+    if device == "mps":
+        model.to("mps")
+    elif device == "cuda":
+        model.to("cuda")
+
+    # ---------------------------------------------------------
+    # APPLY LORA TO REWARD MODEL
+    # ---------------------------------------------------------
+
+    peft_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        bias="none",
+        task_type="SEQ_CLS",
+    )
+
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+
+    # ---------------------------------------------------------
+    # TRAINING ARGUMENTS
+    # ---------------------------------------------------------
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUM,
+        num_train_epochs=NUM_EPOCHS,
+        learning_rate=LR,
+        logging_steps=10,
+        save_steps=200,
+        save_total_limit=2,
+        warmup_ratio=0.1,
+        optim="adamw_torch",
+        fp16=False,
+        bf16=False,
+    )
+
+    # ---------------------------------------------------------
+    # REWARD TRAINER
+    # ---------------------------------------------------------
+
+    trainer = RewardTrainer(
+        model=model,
+        args=training_args,
+        tokenizer=tokenizer,
+        train_dataset=dataset["train"],
+        max_length=MAX_LENGTH,
+        label_column="label",
+        dataset_text_field="text",
+    )
+
+    trainer.train()
+
+    # ---------------------------------------------------------
+    # SAVE
+    # ---------------------------------------------------------
+
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    print("\n🎉 DONE: Reward model saved to:", output_dir)
 
 
-def preprocess(example):
-    # simple concatenation; reward model sees both prompt and response
-    text = f"<s>[INST] {example['instruction']} [/INST]\n{example['response']}</s>"
-    return {"text": text, "label": float(example["reward"])}
-
-
-dataset = dataset.map(preprocess)
-
-
-# ---------------------------------------------------------
-# LOAD MODEL + TOKENIZER
-# ---------------------------------------------------------
-
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-model = AutoModelForSequenceClassification.from_pretrained(
-    BASE_MODEL,
-    num_labels=NUM_LABELS,
-    problem_type="regression",   # critical: reward is a continuous value
-    torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-)
-
-if device == "mps":
-    model.to("mps")
-elif device == "cuda":
-    model.to("cuda")
-
-
-# ---------------------------------------------------------
-# APPLY LoRA TO REWARD MODEL
-# ---------------------------------------------------------
-
-peft_config = LoraConfig(
-    r=8,
-    lora_alpha=16,
-    lora_dropout=0.05,
-    target_modules=[
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"
-    ],
-    bias="none",
-    task_type="SEQ_CLS",
-)
-
-model = get_peft_model(model, peft_config)
-model.print_trainable_parameters()
-
-
-# ---------------------------------------------------------
-# TRAINING ARGUMENTS
-# ---------------------------------------------------------
-
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUM,
-    num_train_epochs=NUM_EPOCHS,
-    learning_rate=LR,
-    logging_steps=10,
-    save_steps=200,
-    save_total_limit=2,
-    warmup_ratio=0.1,
-    optim="adamw_torch",
-    fp16=False,  # MPS controls mixed precision automatically
-    bf16=False,
-)
-
-
-# ---------------------------------------------------------
-# REWARD TRAINER
-# ---------------------------------------------------------
-
-trainer = RewardTrainer(
-    model=model,
-    args=training_args,
-    tokenizer=tokenizer,
-    train_dataset=dataset["train"],
-    max_length=MAX_LENGTH,
-    label_column="label",
-    dataset_text_field="text",
-)
-
-# ---------------------------------------------------------
-# TRAIN
-# ---------------------------------------------------------
-
-trainer.train()
-
-# ---------------------------------------------------------
-# SAVE
-# ---------------------------------------------------------
-
-trainer.save_model(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
-
-print("\n🎉 DONE: Reward model saved to:", OUTPUT_DIR)
-
+if __name__ == "__main__":
+    main()

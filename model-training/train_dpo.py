@@ -1,4 +1,6 @@
 import os
+import argparse
+
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -13,153 +15,161 @@ import torch
 # SETTINGS
 # ---------------------------------------------------------
 
-BASE_MODEL = "meta-llama/Meta-Llama-3.1-13B-Instruct"
-SFT_CHECKPOINT = "./sft-llama-3.1-13b"  # from train_sft.py (if you ran it)
-DATASET_PATH = "../rails-app/export_dpo.jsonl"
-OUTPUT_DIR = "./dpo-llama-3.1-13b"
-
-BATCH_SIZE = 1
-GRADIENT_ACCUM = 4
-LR = 5e-6
-NUM_EPOCHS = 1
-BETA = 0.1          # DPO beta (strength of preference signal)
-MAX_LENGTH = 1024   # prompt + response max length
+BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+SFT_CHECKPOINT = "./sft-llama-3-8b"
+DEFAULT_DATASET_PATH = "../rails-app/export_dpo.jsonl"
+DEFAULT_OUTPUT_DIR = "./dpo-llama-3-8b"
+BETA = 0.1
+MAX_LENGTH = 1024
 
 
-# ---------------------------------------------------------
-# HELPER: DEVICE INFO
-# ---------------------------------------------------------
-
-if torch.backends.mps.is_available():
-    device = "mps"
-elif torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
-
-print(f"Using device: {device}")
+def get_device():
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda"
+    else:
+        return "cpu"
 
 
-# ---------------------------------------------------------
-# LOAD DATASET
-# ---------------------------------------------------------
-# Rails export_dpo.jsonl has:
-# { "instruction": "...", "chosen": "...", "rejected": "..." }
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=DEFAULT_DATASET_PATH,
+        help="Path to DPO JSONL dataset",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Where to save the DPO model",
+    )
+    args = parser.parse_args()
 
-dataset = load_dataset("json", data_files=DATASET_PATH)
+    dataset_path = args.dataset
+    output_dir = args.output_dir
 
-def format_example(example):
-    return {
-        "prompt": example["instruction"],
-        "chosen": example["chosen"],
-        "rejected": example["rejected"],
-    }
+    print("Using dataset:", dataset_path)
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Dataset not found at: {dataset_path}")
 
-dataset = dataset.map(format_example)
+    device = get_device()
+    print(f"Using device: {device}")
 
-# ---------------------------------------------------------
-# LOAD MODEL + TOKENIZER
-# ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # LOAD DATASET
+    # ---------------------------------------------------------
+    # export_dpo.jsonl:
+    # { "instruction": "...", "chosen": "...", "rejected": "..." }
 
-# If SFT checkpoint exists, start DPO from there, else base model
-if os.path.isdir(SFT_CHECKPOINT):
-    model_name_or_path = SFT_CHECKPOINT
-    print(f"Loading SFT checkpoint from: {SFT_CHECKPOINT}")
-else:
-    model_name_or_path = BASE_MODEL
-    print(f"SFT checkpoint not found. Using base model: {BASE_MODEL}")
+    dataset = load_dataset("json", data_files=dataset_path)
 
-tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-# LLaMA models usually have no pad token; set it to eos
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+    def format_example(example):
+        return {
+            "prompt": example["instruction"],
+            "chosen": example["chosen"],
+            "rejected": example["rejected"],
+        }
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_name_or_path,
-    torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-)
+    dataset = dataset.map(format_example)
 
-# Move manually to MPS/CPU if needed (DPOTrainer will also help)
-if device == "mps":
-    model.to("mps")
-elif device == "cuda":
-    model.to("cuda")
-else:
-    model.to("cpu")
+    # ---------------------------------------------------------
+    # LOAD MODEL + TOKENIZER
+    # ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# APPLY LORA (no 4-bit on Mac, just standard LoRA)
-# ---------------------------------------------------------
+    if os.path.isdir(SFT_CHECKPOINT):
+        model_name_or_path = SFT_CHECKPOINT
+        print(f"Loading SFT checkpoint from: {SFT_CHECKPOINT}")
+    else:
+        model_name_or_path = BASE_MODEL
+        print(f"SFT checkpoint not found. Using base model: {BASE_MODEL}")
 
-peft_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    lora_dropout=0.05,
-    target_modules=[
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ],
-    bias="none",
-    task_type="CAUSAL_LM",
-)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-model = get_peft_model(model, peft_config)
-model.print_trainable_parameters()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+    )
 
-# ---------------------------------------------------------
-# TRAINING ARGS
-# ---------------------------------------------------------
+    if device == "mps":
+        model.to("mps")
+    elif device == "cuda":
+        model.to("cuda")
 
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUM,
-    learning_rate=LR,
-    num_train_epochs=NUM_EPOCHS,
-    logging_steps=10,
-    save_steps=200,
-    save_total_limit=2,
-    bf16=False,   # bf16 not on Mac; MPS uses its own dtype
-    fp16=False,   # leave False for MPS; it handles precision internally
-    warmup_ratio=0.1,
-    optim="adamw_torch",
-)
+    # ---------------------------------------------------------
+    # APPLY LORA
+    # ---------------------------------------------------------
+
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+
+    # ---------------------------------------------------------
+    # TRAINING ARGS
+    # ---------------------------------------------------------
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
+        learning_rate=5e-6,
+        num_train_epochs=1,
+        logging_steps=10,
+        save_steps=200,
+        save_total_limit=2,
+        bf16=False,
+        fp16=False,
+        warmup_ratio=0.1,
+        optim="adamw_torch",
+    )
+
+    # ---------------------------------------------------------
+    # DPO TRAINER
+    # ---------------------------------------------------------
+
+    dpo_trainer = DPOTrainer(
+        model=model,
+        args=training_args,
+        beta=BETA,
+        train_dataset=dataset["train"],
+        tokenizer=tokenizer,
+        max_length=MAX_LENGTH,
+        max_target_length=MAX_LENGTH,
+        prompt_column="prompt",
+        chosen_column="chosen",
+        rejected_column="rejected",
+    )
+
+    # ---------------------------------------------------------
+    # TRAIN
+    # ---------------------------------------------------------
+
+    dpo_trainer.train()
+
+    # ---------------------------------------------------------
+    # SAVE
+    # ---------------------------------------------------------
+
+    dpo_trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    print("\n🎉 DONE: DPO-tuned model saved to:", output_dir)
 
 
-# ---------------------------------------------------------
-# DPO TRAINER
-# ---------------------------------------------------------
-
-dpo_trainer = DPOTrainer(
-    model=model,
-    args=training_args,
-    beta=BETA,
-    train_dataset=dataset["train"],
-    tokenizer=tokenizer,
-    max_length=MAX_LENGTH,
-    max_target_length=MAX_LENGTH,
-    prompt_column="prompt",
-    chosen_column="chosen",
-    rejected_column="rejected",
-)
-
-# ---------------------------------------------------------
-# TRAIN
-# ---------------------------------------------------------
-
-dpo_trainer.train()
-
-# ---------------------------------------------------------
-# SAVE
-# ---------------------------------------------------------
-
-dpo_trainer.save_model(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
-
-print("\n🎉 DONE: DPO-tuned model saved to:", OUTPUT_DIR)
-
+if __name__ == "__main__":
+    main()
